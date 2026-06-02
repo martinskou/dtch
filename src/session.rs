@@ -21,7 +21,10 @@ use nix::{
 };
 
 use crate::protocol::{Request, WindowSize};
-use crate::{attach::read_window_size, registry::socket_path};
+use crate::{
+    attach::read_window_size,
+    registry::{restrict_socket_permissions, socket_path, verify_peer_uid},
+};
 
 /// Starts a detached session using the caller's terminal size when available.
 pub(crate) fn run_new(name: String, buffer_lines: usize, command: Vec<String>) -> Result<()> {
@@ -52,6 +55,10 @@ pub(crate) fn start_session(
 
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind {}", socket.display()))?;
+    if let Err(err) = restrict_socket_permissions(&socket) {
+        let _ = fs::remove_file(&socket);
+        return Err(err);
+    }
     let argv = to_cstrings(&command)?;
 
     println!("dtch: session `{name}` started at {}", socket.display());
@@ -140,6 +147,10 @@ fn serve_session(
                 continue;
             }
         };
+        if let Err(err) = verify_peer_uid(&stream) {
+            eprintln!("dtch: {err}");
+            continue;
+        }
         let request = match Request::read_from(&mut stream) {
             Ok(request) => request,
             Err(err) => {

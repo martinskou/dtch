@@ -20,7 +20,7 @@ use nix::sys::termios::{SetArg, Termios, cfmakeraw, tcgetattr, tcsetattr};
 
 use crate::{
     protocol::{Request, WindowSize},
-    registry::socket_path,
+    registry::{connect_to_session, socket_path},
     session::start_session,
 };
 
@@ -99,8 +99,7 @@ fn print_socket_mtime(socket: &Path) -> Result<()> {
 
 /// Connects this terminal to the session socket and streams bytes in both directions.
 fn run_attach(socket: PathBuf) -> Result<()> {
-    let mut stream = UnixStream::connect(&socket)
-        .with_context(|| format!("failed to connect to {}", socket.display()))?;
+    let mut stream = connect_to_session(&socket)?;
     let window_size = read_window_size(io::stdin().as_raw_fd())?;
     Request::Attach(window_size)
         .write_to(&mut stream)
@@ -161,7 +160,7 @@ impl ResizeMonitor {
                 }
                 last_size = size;
 
-                let Ok(mut stream) = UnixStream::connect(&socket) else {
+                let Ok(mut stream) = connect_to_session(&socket) else {
                     continue;
                 };
                 let _ = Request::Resize(size).write_to(&mut stream);

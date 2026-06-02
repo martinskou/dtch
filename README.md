@@ -5,10 +5,10 @@ command inside a pseudo-terminal and keeps that command running after the
 current terminal disconnects. A later `dtch attach` reconnects to the same 
 named session.
 
-Sessions are exposed as Unix sockets at `/tmp/dtch_<name>.sock`. Attachments
-forward terminal input, output, and resize events. Press `Ctrl-E` to detach
-without stopping the command. On attach, `dtch` prints its version and the
-socket modification time.
+Sessions are exposed as owner-only Unix sockets at
+`/tmp/dtch-<uid>/<name>.sock`. Attachments forward terminal input, output, and
+resize events. Press `Ctrl-E` to detach without stopping the command. On attach,
+`dtch` prints its version and the socket modification time.
 
 `dtch` is intended for users who want persistent terminal sessions without 
 replacing their normal terminal workflow.
@@ -91,4 +91,3 @@ and continue interacting with the program as if you had never left.
 ## License
 
 MIT
-

@@ -17,7 +17,7 @@ struct Cli {
 enum Command {
     /// Start a command in a named session.
     New {
-        /// Session name. Uses /tmp/dtch_<name>.sock.
+        /// Session name. Uses /tmp/dtch-<uid>/<name>.sock.
         name: String,
 
         /// Number of terminal output lines to replay on attach.
@@ -42,7 +42,7 @@ enum Command {
         #[arg(short = 'b', long = "buffer-lines", default_value_t = 0)]
         buffer_lines: usize,
 
-        /// Session name. Uses /tmp/dtch_<name>.sock.
+        /// Session name. Uses /tmp/dtch-<uid>/<name>.sock.
         name: String,
 
         /// Command and arguments to run when used with `-c`.
