@@ -7,7 +7,7 @@ use std::{
         fd::{AsRawFd, OwnedFd},
         unix::net::{UnixListener, UnixStream},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::{Arc, Mutex},
     thread,
@@ -28,47 +28,46 @@ use crate::{
 
 /// Starts a detached session using the caller's terminal size when available.
 pub(crate) fn run_new(name: String, buffer_lines: usize, command: Vec<String>) -> Result<()> {
-    let socket = socket_path(&name)?;
     let initial_window_size = read_window_size(io::stdin().as_raw_fd()).ok();
-    start_session(name, socket, buffer_lines, command, initial_window_size)
+    start_session(name, buffer_lines, command, initial_window_size)
 }
 
 /// Validates and binds a session socket, then forks the background server.
 pub(crate) fn start_session(
     name: String,
-    socket: PathBuf,
     buffer_lines: usize,
     command: Vec<String>,
     initial_window_size: Option<WindowSize>,
 ) -> Result<()> {
+    let socket = socket_path(&name)?;
     if socket.exists() {
         bail!("session already exists: {name} ({})", socket.display());
     }
 
-    if let Some(parent) = socket
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind {}", socket.display()))?;
-    if let Err(err) = restrict_socket_permissions(&socket) {
-        let _ = fs::remove_file(&socket);
-        return Err(err);
-    }
+    let socket_cleanup = SocketCleanup::new(socket);
+    restrict_socket_permissions(socket_cleanup.path())?;
     let argv = to_cstrings(&command)?;
 
-    println!("dtch: session `{name}` started at {}", socket.display());
+    println!(
+        "dtch: session `{name}` started at {}",
+        socket_cleanup.path().display()
+    );
 
     match unsafe { fork() }.context("failed to fork session server")? {
-        ForkResult::Parent { .. } => Ok(()),
+        ForkResult::Parent { .. } => {
+            socket_cleanup.disarm();
+            Ok(())
+        }
         ForkResult::Child => {
-            if let Err(err) =
-                run_session_server(listener, socket, argv, buffer_lines, initial_window_size)
-            {
+            if let Err(err) = run_session_server(
+                listener,
+                socket_cleanup,
+                argv,
+                buffer_lines,
+                initial_window_size,
+            ) {
                 eprintln!("dtch: {err:#}");
                 process::exit(1);
             }
@@ -81,7 +80,7 @@ pub(crate) fn start_session(
 /// Daemonizes, starts the command under a pty, and serves its parent process.
 fn run_session_server(
     listener: UnixListener,
-    socket: PathBuf,
+    socket_cleanup: SocketCleanup,
     argv: Vec<CString>,
     buffer_lines: usize,
     initial_window_size: Option<WindowSize>,
@@ -97,7 +96,7 @@ fn run_session_server(
             process::exit(127);
         }
         ForkptyResult::Parent { child, master } => {
-            serve_session(listener, socket, master, child, buffer_lines)
+            serve_session(listener, socket_cleanup, master, child, buffer_lines)
         }
     }
 }
@@ -116,7 +115,7 @@ fn daemonize() -> io::Result<()> {
 /// Accepts attach and resize requests while worker threads handle pty I/O.
 fn serve_session(
     listener: UnixListener,
-    socket: PathBuf,
+    socket_cleanup: SocketCleanup,
     master: OwnedFd,
     child: Pid,
     buffer_lines: usize,
@@ -132,7 +131,7 @@ fn serve_session(
     let output_buffer = Arc::clone(&line_buffer);
     thread::spawn(move || copy_pty_to_clients(master, output_clients, output_buffer));
 
-    let reap_socket = socket.clone();
+    let reap_socket = socket_cleanup.path().to_owned();
     thread::spawn(move || {
         let _ = wait_for_child(child);
         let _ = fs::remove_file(reap_socket);
@@ -196,6 +195,68 @@ fn serve_session(
     }
 
     Ok(())
+}
+
+/// Removes a bound session socket unless ownership has moved to the daemon.
+struct SocketCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl SocketCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, process};
+
+    use super::SocketCleanup;
+
+    fn cleanup_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("dtch-{name}-{}", process::id()))
+    }
+
+    #[test]
+    fn socket_cleanup_removes_armed_path() {
+        let path = cleanup_path("armed-cleanup-test");
+        fs::write(&path, []).unwrap();
+
+        {
+            let _cleanup = SocketCleanup::new(path.clone());
+        }
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn socket_cleanup_preserves_disarmed_path() {
+        let path = cleanup_path("disarmed-cleanup-test");
+        fs::write(&path, []).unwrap();
+
+        SocketCleanup::new(path.clone()).disarm();
+
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
+    }
 }
 
 /// Applies a client terminal size to the session pty.

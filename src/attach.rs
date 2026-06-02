@@ -1,10 +1,8 @@
 use std::{
-    ffi::CStr,
     fs,
     io::{self, Read, Write},
     net::Shutdown,
     os::fd::{AsFd, AsRawFd, OwnedFd, RawFd},
-    os::unix::fs::MetadataExt,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
@@ -17,6 +15,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use nix::sys::termios::{SetArg, Termios, cfmakeraw, tcgetattr, tcsetattr};
+use time::{OffsetDateTime, UtcOffset, macros::format_description};
 
 use crate::{
     protocol::{Request, WindowSize},
@@ -27,6 +26,9 @@ use crate::{
 const DETACH_BYTE: u8 = 0x05; // Ctrl-E
 const RESTORE_TERMINAL_MODES: &[u8] =
     b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b>\x1b[0m\x1b[?25h";
+const SOCKET_MTIME_FORMAT: &[time::format_description::BorrowedFormatItem<'_>] = format_description!(
+    "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory][offset_minute]"
+);
 
 /// Attaches to a session, creating it first when requested and necessary.
 pub(crate) fn run_attach_or_create(
@@ -51,13 +53,7 @@ pub(crate) fn run_attach_or_create(
         }
 
         let window_size = read_window_size(io::stdin().as_raw_fd())?;
-        start_session(
-            name.clone(),
-            socket.clone(),
-            buffer_lines,
-            command,
-            Some(window_size),
-        )?;
+        start_session(name.clone(), buffer_lines, command, Some(window_size))?;
     }
 
     print_socket_mtime(&socket)?;
@@ -69,31 +65,17 @@ pub(crate) fn run_attach_or_create(
 
 /// Prints the socket modification time as a local datetime with timezone.
 fn print_socket_mtime(socket: &Path) -> Result<()> {
-    let timestamp = fs::metadata(socket)
+    let modified = fs::metadata(socket)
         .with_context(|| format!("failed to read metadata for {}", socket.display()))?
-        .mtime();
-    let mut local_time = unsafe { std::mem::zeroed() };
-    let local_time = unsafe { libc::localtime_r(&timestamp, &mut local_time) };
-    if local_time.is_null() {
-        return Err(io::Error::last_os_error()).context("failed to format socket mtime");
-    }
+        .modified()
+        .with_context(|| format!("failed to read mtime for {}", socket.display()))?;
 
-    let mut formatted = [0_i8; 64];
-    let format = c"%Y-%m-%d %H:%M:%S %z";
-    let len = unsafe {
-        libc::strftime(
-            formatted.as_mut_ptr(),
-            formatted.len(),
-            format.as_ptr(),
-            local_time,
-        )
-    };
-    if len == 0 {
-        bail!("failed to format socket mtime");
-    }
+    let offset =
+        UtcOffset::current_local_offset().context("failed to determine local UTC offset")?;
+    let dt = OffsetDateTime::from(modified).to_offset(offset);
 
-    let formatted = unsafe { CStr::from_ptr(formatted.as_ptr()) };
-    println!("dtch: socket mtime {}", formatted.to_string_lossy());
+    println!("dtch: socket mtime {}", dt.format(SOCKET_MTIME_FORMAT)?);
+
     Ok(())
 }
 

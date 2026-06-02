@@ -1,4 +1,5 @@
 mod attach;
+mod peer_credentials;
 mod protocol;
 mod registry;
 mod session;
